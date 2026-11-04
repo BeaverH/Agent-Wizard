@@ -1,0 +1,11 @@
+{
+  "name": "agent-wizard-demo",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite --host 127.0.0.1 --port 18123", "build": "tsc --noEmit && vite build", "test:skills": "node --experimental-strip-types scripts/skills-check.mjs", "test:governance": "node --experimental-strip-types scripts/governance-check.mjs", "test:work": "node --experimental-strip-types scripts/work-engine-check.mjs", "preview": "vite preview --host 127.0.0.1 --port 18124" },
+  "dependencies": {
+    "react": "^19.2.7", "react-dom": "^19.2.7", "radix-ui": "^1.6.2", "lucide-react": "^1.24.0", "class-variance-authority": "^0.7.1", "clsx": "^2.1.1", "tailwind-merge": "^3.4.0", "tw-animate-css": "^1.4.0", "@fontsource/hanken-grotesk": "^5.2.8", "@fontsource/chivo-mono": "^5.2.8", "@fontsource/noto-serif-sc": "^5.2.9"
+  },
+  "devDependencies": { "vite": "^8.1.4", "typescript": "^7.0.2", "@vitejs/plugin-react": "^6.0.1", "tailwindcss": "^4.3.2", "@tailwindcss/vite": "^4.3.2", "@types/react": "^19.2.14", "@types/react-dom": "^19.2.3", "@types/node": "^24.10.1" }
+}

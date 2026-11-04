@@ -1,0 +1,226 @@
+import assert from 'node:assert/strict';
+import {makeWork,applyWorkCommand,nextSeq,recalculate,recordSubtaskResult} from '../src/work-engine.ts';
+import {visibleAfter,canSeeWorkItem,canSeeWorkRun,mainConversationId,migrateWorkConversations,conversationContext,latestTaskResult,getTaskResults,dependencyInputs,dependenciesReady,taskContext,taskReadiness} from '../src/work-model.ts';
+
+let assertions=0;
+const coordinator={agentId:'AGT-002',name:'协调助手',role:'coordinator',version:'v1.0.0',releaseId:'REL-1',assignment:'协调'};
+const fixture=()=>makeWork({title:'经营汇报',goal:'完成经营汇报',deliverableTitle:'经营汇报.md',executorType:'agent',executorId:'AGT-002',invitees:['u-lin']},'u-huang',[coordinator]);
+const apply=(w,actor,command)=>{const result=applyWorkCommand(w,actor,command);assert.ok(result.work,result.error);assertions++;return result.work;};
+const deny=(w,actor,command)=>{const result=applyWorkCommand(w,actor,command);assert.ok(result.error,`Expected denial: ${command.type}`);assert.equal(result.work,undefined);assertions++;};
+
+let w=fixture();const original=w;const before=structuredClone(w);
+w=apply(w,'u-lin',{type:'message',text:'建议补充渠道口径。'});
+assert.equal(w.subtasks.length,before.subtasks.length);assert.equal(w.artifacts.length,0);assert.equal(w.messages.length,before.messages.length+1);assert.deepEqual(original,before);assertions+=4;
+w=apply(w,'u-lin',{type:'message',text:'你怎么看？',mentionId:'AGT-002'});
+assert.equal(w.subtasks[0].status,'todo');assert.equal(w.messages.at(-1).kind,'agent');assertions+=2;
+w=apply(w,'u-lin',{type:'assign',title:'核对统计口径',assigneeId:'u-lin'});
+deny(w,'u-lin',{type:'invite',personId:'u-zhou',role:'observer',history:'all'});
+w=apply(w,'u-huang',{type:'invite',personId:'u-zhou',role:'observer',history:'from_join'});
+assert.equal(visibleAfter(w,'u-zhou',w.messages[0].seq),false);assert.equal(visibleAfter(w,'u-zhou',w.messages.at(-1).seq),true);assertions+=2;
+deny(w,'u-zhou',{type:'message',text:'观察者不能派活'});
+deny(w,'u-zhou',{type:'assign',title:'越权派活',assigneeId:'AGT-002'});
+deny(w,'u-lin',{type:'material',name:'受限财务材料',detail:'保密',source:'knowledge',restricted:true});
+
+w=apply(w,'u-lin',{type:'propose',kind:'goal',detail:'补充渠道对比',newGoal:'完成经营汇报并比较渠道'});
+const decision=w.decisions.at(-1).id;
+deny(w,'u-lin',{type:'resolve',decisionId:decision,approve:true});
+deny(w,'u-huang',{type:'assemble'});
+w.artifacts.push({id:'ART-OLD',number:1,title:'旧稿',content:'旧稿内容',goalRevision:1,status:'review',createdBy:'u-lin',createdAt:'now',seq:nextSeq(w)});
+w=apply(w,'u-huang',{type:'resolve',decisionId:decision,approve:true});
+assert.equal(w.goalRevision,2);assert.equal(w.artifacts[0].status,'outdated');assert.equal(w.artifacts[0].content,'旧稿内容');assertions+=3;
+deny(w,'u-huang',{type:'accept',artifactId:'ART-OLD'});
+deny(w,'u-huang',{type:'resolve',decisionId:decision,approve:true});
+w=apply(w,'u-lin',{type:'assign',title:'按新目标整理报告',assigneeId:'u-lin'});
+const humanTask=w.subtasks.at(-1).id;
+deny(w,'u-chen',{type:'human-result',subtaskId:humanTask,result:'无成员资格'});
+w=apply(w,'u-lin',{type:'human-result',subtaskId:humanTask,result:'新目标报告完成。'});
+w=apply(w,'u-lin',{type:'assemble'});const artifact=w.artifacts.at(-1);
+assert.equal(w.status,'review');assert.equal(artifact.goalRevision,2);assertions+=2;
+deny(w,'u-lin',{type:'accept',artifactId:artifact.id});
+w=apply(w,'u-lin',{type:'artifact',content:'共同修订后的成果'});
+assert.equal(w.artifacts.length,3);assert.equal(w.artifacts[1].content,artifact.content);assertions+=2;
+deny(w,'u-huang',{type:'accept',artifactId:artifact.id});
+w=apply(w,'u-huang',{type:'accept',artifactId:w.artifacts.at(-1).id});
+assert.equal(w.status,'completed');assert.equal(w.artifacts.at(-1).acceptedBy,'u-huang');assertions+=2;
+deny(w,'u-huang',{type:'assign',title:'验收后静默执行',assigneeId:'AGT-002'});
+w=apply(w,'u-huang',{type:'remove',personId:'u-lin'});
+deny(w,'u-lin',{type:'message',text:'已被移出'});
+
+let conflict=fixture();
+conflict=apply(conflict,'u-lin',{type:'propose',kind:'goal',detail:'方案甲',newGoal:'方案甲'});
+conflict=apply(conflict,'u-huang',{type:'propose',kind:'goal',detail:'方案乙',newGoal:'方案乙'});
+conflict=apply(conflict,'u-huang',{type:'resolve',decisionId:conflict.decisions[0].id,approve:true});
+deny(conflict,'u-huang',{type:'resolve',decisionId:conflict.decisions[1].id,approve:true});
+assert.equal(conflict.goal,'方案甲');assertions++;
+
+let business=fixture();business=apply(business,'u-lin',{type:'business',detail:'向审批系统提交本次申请'});
+const businessDecision=business.decisions[0].id;
+deny(business,'u-huang',{type:'resolve',decisionId:businessDecision,approve:true});
+business=apply(business,'u-huang',{type:'resolve',decisionId:businessDecision,approve:true,runId:'RUN-PROTECTED'});
+assert.equal(business.subtasks.at(-1).status,'running');assert.equal(business.subtasks.at(-1).runId,'RUN-PROTECTED');assertions+=2;
+deny(business,'u-huang',{type:'resolve',decisionId:businessDecision,approve:true,runId:'RUN-DUPLICATE'});
+
+let restricted=fixture();restricted=apply(restricted,'u-huang',{type:'material',name:'已有共享资料',detail:'共享',source:'upload'});
+restricted=apply(restricted,'u-huang',{type:'invite',personId:'u-chen',role:'collaborator',history:'from_join'});
+restricted.subtasks.forEach(t=>{t.status='done';t.result='历史结果';});
+deny(restricted,'u-chen',{type:'assemble'});
+assert.equal(recalculate(restricted).status,'active');assertions++;
+
+// New messages and artifacts cannot launder an older source into a join-only scope.
+const sourceSeq=restricted.subtasks[0].seq;
+const newSeq=nextSeq(restricted);
+assert.equal(canSeeWorkItem(restricted,'u-chen',{seq:newSeq,sourceSeq}),false);
+restricted.subtasks[0].runId='RUN-HISTORICAL';
+assert.equal(canSeeWorkRun([restricted],'u-chen',{id:'RUN-HISTORICAL',workId:restricted.id,sourceSeq}),false);
+assert.equal(canSeeWorkRun([restricted],'u-huang',{id:'RUN-HISTORICAL',workId:restricted.id,sourceSeq}),true);
+assert.equal(canSeeWorkRun([restricted],'u-zhou',{id:'RUN-HISTORICAL',workId:restricted.id}),false);assertions+=4;
+
+// Changed evidence requires a new deliverable version before acceptance.
+let stale=fixture();stale.subtasks[0].status='done';stale.subtasks[0].result='初版分析';
+stale=apply(stale,'u-huang',{type:'assemble'});const staleArtifact=stale.artifacts.at(-1).id;
+stale=apply(stale,'u-lin',{type:'assign',title:'复核相反证据',assigneeId:'u-lin'});
+stale=apply(stale,'u-lin',{type:'human-result',subtaskId:stale.subtasks.at(-1).id,result:'新证据要求修改原结论'});
+deny(stale,'u-huang',{type:'accept',artifactId:staleArtifact});
+stale=apply(stale,'u-huang',{type:'assemble'});
+assert.ok(stale.artifacts.at(-1).content.includes('新证据要求修改原结论'));assertions++;
+stale=apply(stale,'u-huang',{type:'material',name:'补充材料',detail:'新数据',source:'upload'});
+deny(stale,'u-huang',{type:'accept',artifactId:stale.artifacts.at(-1).id});
+
+// Scope changes retain the objective and rebinding requires explicit owner confirmation.
+let scope=fixture();const objective=scope.goal;
+scope=apply(scope,'u-lin',{type:'propose',kind:'scope',detail:'增加渠道资料',newGoal:'不应覆盖目标',rebindAgents:true});
+const scopeDecision=scope.decisions[0].id;
+deny(scope,'u-huang',{type:'resolve',decisionId:scopeDecision,approve:true});
+scope=apply(scope,'u-huang',{type:'resolve',decisionId:scopeDecision,approve:true,agentSnapshots:[{...coordinator,version:'v2.0.0',releaseId:'REL-2'}]});
+assert.equal(scope.goal,objective);assert.equal(scope.agents[0].version,'v2.0.0');assert.equal(scope.scopeNotes[0],'增加渠道资料');assertions+=3;
+// Retrying a failed subtask preserves every Run and can reach acceptance.
+let retry=fixture();const retryTask=retry.subtasks[0].id;
+retry=apply(retry,'u-lin',{type:'start',subtaskId:retryTask,runId:'RUN-FAILED'});
+retry.subtasks[0].status='blocked';retry.subtasks[0].result='工具超时';
+retry=apply(retry,'u-lin',{type:'start',subtaskId:retryTask,runId:'RUN-RETRY'});
+assert.deepEqual(retry.subtasks[0].runIds,['RUN-FAILED','RUN-RETRY']);assert.equal(retry.subtasks[0].result,undefined);
+assert.equal(canSeeWorkRun([retry],'u-huang',{id:'RUN-FAILED',workId:retry.id}),true);assertions+=3;
+deny(retry,'u-lin',{type:'start',subtaskId:retryTask,runId:'RUN-DUPLICATE'});
+retry.subtasks[0].status='done';retry.subtasks[0].result='重试成功';
+retry=apply(retry,'u-lin',{type:'assemble'});
+retry=apply(retry,'u-huang',{type:'accept',artifactId:retry.artifacts.at(-1).id});
+assert.equal(retry.status,'completed');assertions++;
+const protectedTask=business.subtasks.at(-1);protectedTask.status='blocked';
+deny(business,'u-lin',{type:'start',subtaskId:protectedTask.id,runId:'RUN-UNAPPROVED-RETRY'});
+business=apply(business,'u-huang',{type:'start',subtaskId:protectedTask.id,runId:'RUN-CONFIRMED-RETRY'});
+assert.equal(canSeeWorkRun([business],'u-huang',{id:'RUN-PROTECTED',workId:business.id}),true);assertions++;
+business.subtasks.at(-1).status='blocked';
+deny(business,'u-huang',{type:'save-result',subtaskId:business.subtasks.at(-1).id,content:'不能手工改成业务成功'});
+// Legacy tasks keep their transcript, results, members and identity on migration.
+const legacy=fixture();delete legacy.conversations;
+legacy.messages.forEach(m=>delete m.conversationId);legacy.subtasks.forEach(t=>delete t.conversationId);
+const legacyBefore=structuredClone(legacy);const migrated=migrateWorkConversations(legacy);
+assert.equal(migrated.id,legacy.id);assert.equal(migrated.conversations.length,1);
+assert.deepEqual(migrated.members,legacy.members);assert.equal(migrated.messages.length,legacy.messages.length);
+assert.ok(migrated.messages.every(m=>m.conversationId===mainConversationId(migrated)));
+assert.deepEqual(migrateWorkConversations(migrated),migrated);assert.deepEqual(legacy,legacyBefore);assertions+=7;
+
+// Topic chats keep independent transcripts while sharing one task goal and deliverable.
+let multi=fixture();const main=mainConversationId(multi);const initialGoal=multi.goal;
+multi=apply(multi,'u-lin',{type:'create-conversation',id:'CHAT-FINANCE',title:'财务口径',agentIds:['AGT-002']});
+multi=apply(multi,'u-huang',{type:'create-conversation',id:'CHAT-WRITING',title:'汇报撰写',agentIds:['AGT-002']});
+deny(multi,'u-lin',{type:'create-conversation',id:'CHAT-EXTERNAL',title:'越权Agent',agentIds:['AGT-EXTERNAL']});
+deny(multi,'u-lin',{type:'create-conversation',id:'CHAT-EMPTY',title:'无参与者',agentIds:[]});
+multi=apply(multi,'u-lin',{type:'message',conversationId:'CHAT-FINANCE',text:'仅财务会话的讨论：口径尚未确认。'});
+const source=multi.messages.at(-1);
+assert.equal(conversationContext(multi,'u-huang','CHAT-WRITING').input.includes('仅财务会话的讨论'),false);
+assert.equal(conversationContext(multi,'u-huang','CHAT-FINANCE').input.includes('仅财务会话的讨论'),true);
+assert.equal(conversationContext(multi,'u-zhou','CHAT-FINANCE'),null);assertions+=3;
+deny(multi,'u-lin',{type:'message',conversationId:'CHAT-MISSING',text:'不存在'});
+deny(multi,'u-lin',{type:'message',conversationId:'CHAT-FINANCE',mentionId:'AGT-008',text:'越过参与Agent池'});
+multi=apply(multi,'u-lin',{type:'publish-conclusion',conversationId:'CHAT-FINANCE',sourceMessageId:source.id,text:'建议营收与回款分开披露。'});
+const published=multi.messages.at(-1);
+assert.equal(published.conversationId,main);assert.equal(published.sourceMessageId,source.id);
+assert.equal(published.sourceConversationId,'CHAT-FINANCE');assert.equal(multi.goal,initialGoal);
+assert.equal(multi.decisions.length,0);assert.equal(multi.artifacts.length,0);
+assert.equal(published.goalRevision,1);assertions+=7;
+deny(multi,'u-lin',{type:'publish-conclusion',conversationId:'CHAT-FINANCE',sourceMessageId:source.id,text:published.text});
+assert.equal(conversationContext(multi,'u-huang','CHAT-WRITING').input.includes(published.text),false);assertions++;
+multi=apply(multi,'u-huang',{type:'reference-message',conversationId:'CHAT-WRITING',sourceMessageId:published.id});
+assert.equal(conversationContext(multi,'u-huang','CHAT-WRITING').input.includes(published.text),true);assertions++;
+multi=apply(multi,'u-lin',{type:'assign',conversationId:'CHAT-FINANCE',title:'核对两项口径',assigneeId:'AGT-002'});
+assert.equal(multi.subtasks.at(-1).conversationId,'CHAT-FINANCE');assertions++;
+multi=apply(multi,'u-huang',{type:'material',name:'任务共享资料',detail:'所有专题获准共享的摘要',source:'upload'});
+assert.equal(conversationContext(multi,'u-huang','CHAT-WRITING').input.includes('所有专题获准共享的摘要'),true);assertions++;
+multi=apply(multi,'u-huang',{type:'invite',personId:'u-chen',role:'collaborator',history:'from_join'});
+assert.equal(conversationContext(multi,'u-chen','CHAT-FINANCE').input.includes(source.text),false);assertions++;
+deny(multi,'u-chen',{type:'reference-message',conversationId:'CHAT-WRITING',sourceMessageId:published.id});
+deny(multi,'u-chen',{type:'publish-conclusion',conversationId:'CHAT-FINANCE',sourceMessageId:source.id,text:'不能转发加入前内容'});
+multi=apply(multi,'u-huang',{type:'invite',personId:'u-zhou',role:'observer',history:'all'});
+deny(multi,'u-zhou',{type:'create-conversation',id:'CHAT-OBSERVE',title:'观察者不能创建',agentIds:['AGT-002']});
+deny(multi,'u-zhou',{type:'reference-message',conversationId:'CHAT-WRITING',sourceMessageId:source.id});
+// A later transfer preserves the earliest source restriction through multiple hops.
+const referenced=multi.messages.find(m=>m.sourceMessageId===published.id);
+assert.equal(referenced.sourceSeq,source.seq);assert.equal(canSeeWorkItem(multi,'u-chen',referenced),false);assertions+=2;
+// A new task can consume old authorized chat context; derived artifacts retain that boundary.
+let derived=fixture();const privateSource=derived.messages[0].seq;
+derived=apply(derived,'u-huang',{type:'invite',personId:'u-chen',role:'collaborator',history:'from_join'});
+derived=apply(derived,'u-huang',{type:'propose',kind:'goal',detail:'重新整理',newGoal:'新目标'});
+derived=apply(derived,'u-huang',{type:'resolve',decisionId:derived.decisions.at(-1).id,approve:true});
+derived=apply(derived,'u-huang',{type:'assign',title:'新修订的可见分工',assigneeId:'AGT-002'});
+const derivedTask=derived.subtasks.at(-1).id;
+derived=apply(derived,'u-huang',{type:'start',subtaskId:derivedTask,runId:'RUN-OLD-CONTEXT',sourceSeq:privateSource});
+derived.subtasks.at(-1).status='done';derived.subtasks.at(-1).result='由历史输入生成的结果';
+deny(derived,'u-chen',{type:'assemble'});
+derived=apply(derived,'u-huang',{type:'assemble'});
+assert.equal(derived.artifacts.at(-1).sourceSeq,privateSource);
+assert.equal(canSeeWorkItem(derived,'u-chen',derived.artifacts.at(-1)),false);
+assert.equal(canSeeWorkRun([derived],'u-chen',{id:'RUN-OLD-CONTEXT',workId:derived.id}),false);assertions+=3;
+// Submitted outputs are shared across chats; unsubmitted discussion stays local.
+let graph=fixture();const writing=graph.subtasks[0].id;
+graph=apply(graph,'u-huang',{type:'create-conversation',id:'CHAT-INPUT',title:'口径核对',agentIds:['AGT-002']});
+graph=apply(graph,'u-huang',{type:'create-conversation',id:'CHAT-OUTPUT',title:'报告撰写',agentIds:['AGT-002']});
+graph.subtasks[0].conversationId='CHAT-OUTPUT';
+graph=apply(graph,'u-lin',{type:'assign',conversationId:'CHAT-INPUT',title:'核对财务口径',assigneeId:'u-lin'});const finance=graph.subtasks.at(-1).id;
+graph=apply(graph,'u-lin',{type:'message',conversationId:'CHAT-INPUT',text:'未确认的猜想不会进入撰写上下文'});
+graph=apply(graph,'u-huang',{type:'set-dependencies',subtaskId:writing,dependsOn:[finance]});
+graph=apply(graph,'u-huang',{type:'assign',title:'最终审阅',assigneeId:'AGT-002',dependsOn:[writing]});const review=graph.subtasks.at(-1).id;
+assert.equal(dependenciesReady(graph,graph.subtasks[0]),false);assert.equal(taskContext(graph,'u-huang',writing),null);assertions+=2;
+deny(graph,'u-huang',{type:'start',subtaskId:writing,runId:'RUN-EARLY'});
+deny(graph,'u-huang',{type:'set-dependencies',subtaskId:finance,dependsOn:[review]});
+deny(graph,'u-huang',{type:'set-dependencies',subtaskId:finance,dependsOn:[finance]});
+graph=apply(graph,'u-lin',{type:'save-result',subtaskId:finance,content:'财务口径 v1：营收与回款分别披露'});
+const inputV1=taskContext(graph,'u-huang',writing);
+assert.ok(inputV1.input.includes('财务口径 v1'));assert.equal(inputV1.input.includes('未确认的猜想'),false);
+assert.equal(inputV1.inputs[0].version,1);assert.equal(taskReadiness(graph,graph.subtasks[0]),'ready');assertions+=4;
+graph=apply(graph,'u-huang',{type:'start',subtaskId:writing,runId:'RUN-WRITE-V1',inputs:inputV1.inputs,sourceSeq:inputV1.sourceSeq});
+const frozenInputs=structuredClone(graph.subtasks[0].inputs);
+deny(graph,'u-huang',{type:'set-dependencies',subtaskId:writing,dependsOn:[]});
+graph=apply(graph,'u-lin',{type:'save-result',subtaskId:finance,content:'财务口径 v2：统一统计区间'});
+assert.deepEqual(graph.subtasks[0].inputs,frozenInputs);assertions++;
+recordSubtaskResult(graph,graph.subtasks[0],'使用旧口径形成的报告','AGT-002','RUN-WRITE-V1',frozenInputs);recalculate(graph);
+assert.equal(latestTaskResult(graph.subtasks[0]).inputs[0].version,1);
+assert.equal(taskReadiness(graph,graph.subtasks[0]),'outdated');
+assert.equal(taskReadiness(graph,graph.subtasks.at(-1)),'waiting');assertions+=3;
+deny(graph,'u-huang',{type:'start',subtaskId:review,runId:'RUN-INVALID-DOWNSTREAM'});
+deny(graph,'u-huang',{type:'save-result',subtaskId:review,content:'不能跳过上游更新'});
+deny(graph,'u-huang',{type:'assemble'});
+graph=apply(graph,'u-huang',{type:'start',subtaskId:writing,runId:'RUN-WRITE-V2',inputs:dependencyInputs(graph,graph.subtasks[0])});
+recordSubtaskResult(graph,graph.subtasks[0],'采用统一统计区间的报告','AGT-002','RUN-WRITE-V2',graph.subtasks[0].inputs);
+assert.equal(getTaskResults(graph.subtasks[0]).length,2);assert.equal(getTaskResults(graph.subtasks[0])[0].content,'使用旧口径形成的报告');assertions+=2;
+graph=apply(graph,'u-huang',{type:'start',subtaskId:review,runId:'RUN-REVIEW-V1'});
+recordSubtaskResult(graph,graph.subtasks.at(-1),'审核完成','AGT-002','RUN-REVIEW-V1',graph.subtasks.at(-1).inputs);
+graph=apply(graph,'u-huang',{type:'assemble'});const priorArtifact=graph.artifacts.at(-1).id;
+graph=apply(graph,'u-lin',{type:'save-result',subtaskId:finance,content:'财务口径 v3：修正渠道归属'});
+assert.equal(taskReadiness(graph,graph.subtasks[0]),'outdated');assert.equal(taskReadiness(graph,graph.subtasks.at(-1)),'outdated');assertions+=2;
+deny(graph,'u-huang',{type:'start',subtaskId:review,runId:'RUN-SKIP-REWRITE'});
+deny(graph,'u-huang',{type:'accept',artifactId:priorArtifact});
+// A join-only collaborator cannot consume historical dependency results through a new task.
+graph=apply(graph,'u-huang',{type:'invite',personId:'u-chen',role:'collaborator',history:'from_join'});
+graph=apply(graph,'u-huang',{type:'assign',title:'新分工也受来源限制',assigneeId:'u-chen',dependsOn:[finance]});const restrictedTask=graph.subtasks.at(-1).id;
+assert.equal(taskContext(graph,'u-chen',restrictedTask),null);assertions++;
+deny(graph,'u-chen',{type:'save-result',subtaskId:restrictedTask,content:'不可读依赖'});
+deny(graph,'u-lin',{type:'save-result',subtaskId:writing,content:'不能修改其他执行者成果'});
+const legacyDone=fixture();legacyDone.subtasks[0].status='done';legacyDone.subtasks[0].result='旧成果';
+const migratedDone=migrateWorkConversations(legacyDone);
+assert.equal(latestTaskResult(migratedDone.subtasks[0]).version,1);
+assert.deepEqual(migrateWorkConversations(migratedDone),migratedDone);assertions+=2;
+// Closed work cannot be silently reopened by result editing or dependency changes.
+deny(w,'u-huang',{type:'save-result',subtaskId:w.subtasks[0].id,content:'验收后改写'});
+deny(w,'u-huang',{type:'set-dependencies',subtaskId:w.subtasks[0].id,dependsOn:[]});
+console.log(`PASS: ${assertions} collaboration assertions (dependencies, version handoff, shared context, invalidation, migration, roles, history, acceptance, retries).`);
